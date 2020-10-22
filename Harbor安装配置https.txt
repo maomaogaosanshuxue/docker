@@ -1,0 +1,182 @@
+. Harbor部署
+1.docker-compose安装
+sudo curl -L "https://github.com/docker/compose/releases/download/1.27.4/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+sudo chmod +x /usr/local/bin/docker-compose
+ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
+$ docker-compose --version
+docker-compose version 1.27.4, build 1110ad01
+
+docker-compose常用命令
+docker-compose -h                           # 查看帮助
+
+docker-compose up                           # 创建并运行所有容器
+docker-compose up -d                        # 创建并后台运行所有容器
+docker-compose -f docker-compose.yml up -d  # 指定模板
+docker-compose down                         # 停止并删除容器、网络、卷、镜像。
+
+docker-compose logs       # 查看容器输出日志
+docker-compose pull       # 拉取依赖镜像
+dokcer-compose config     # 检查配置
+dokcer-compose config -q  # 检查配置，有问题才有输出
+
+docker-compose restart   # 重启服务
+docker-compose start     # 启动服务
+docker-compose stop      # 停止服务
+
+
+Harbor为运维提供了多种部署方法，你可以直接clone最新代码，也可以支持offline的部署方法，直接下载官方构建好的镜像来进行使用。
+下载 Harbor
+
+[root@docker src]# wget https://github.com/goharbor/harbor/releases/download/v1.10.1/harbor-offline-installer-v1.10.1.tgz
+[root@docker src]# tar zxf harbor-offline-installer-v1.10.1.tgz
+
+2. 生成证书颁发机构证书
+在生产环境中，您应该从CA获得证书。在测试或开发环境中，您可以生成自己的CA。要生成CA证书，请运行以下命令。
+
+2.1 生成CA证书私钥
+openssl genrsa -out ca.key 4096
+
+2.2 生成证书
+调整-subj选项中的值以反映您的组织。如果使用FQDN连接Harbor主机，则必须将其指定为通用名称（CN）属性。
+
+openssl req -x509 -new -nodes -sha512 -days 3650 \
+ -subj "/C=CN/ST=Beijing/L=Beijing/O=example/OU=Personal/CN=172.16.100.6" \
+ -key ca.key \
+ -out ca.crt
+
+ #如果是有域名，可以把IP改成域名
+
+3. 生成服务证书
+证书通常包含一个.crt文件和一个.key文件
+
+3.1 生成私钥
+openssl genrsa -out 172.16.100.6.key 4096
+3.2 生成证书签名请求
+
+openssl req -sha512 -new \
+    -subj "/C=CN/ST=Beijing/L=Beijing/O=example/OU=Personal/CN=172.16.100.6" \
+    -key 172.16.100.6.key \
+    -out 172.16.100.6.csr
+
+ #如果是有域名，可以把IP改成域名。
+3.3 生成一个x509 v3扩展文件
+无论您使用FQDN还是IP地址连接到Harbor主机，都必须创建此文件，以便可以为您的Harbor主机生成符合主题备用名称（SAN）和x509 v3的证书扩展要求。替换DNS条目以反映您的域
+
+cat > v3.ext <<-EOF
+authorityKeyIdentifier=keyid,issuer
+basicConstraints=CA:FALSE
+keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1=harbor.com
+DNS.2=harbor.com
+DNS.3=harbor.com
+EOF
+
+如果是ip访问
+
+cat > v3.ext <<-EOF
+authorityKeyIdentifier=keyid,issuer
+basicConstraints=CA:FALSE
+keyUsage = digitalSignature, nonRepudiation, keyEncipherment, dataEncipherment
+extendedKeyUsage = serverAuth
+subjectAltName = IP:172.16.100.6
+EOF
+3.4 使用该V3.exe文件为您的Harbor主机生成证书
+
+openssl x509 -req -sha512 -days 3650 \
+    -extfile v3.ext \
+    -CA ca.crt -CAkey ca.key -CAcreateserial \
+    -in 172.16.100.6.csr \
+    -out 172.16.100.6.crt
+#如果有域名可以把IP改成域名
+4. 提供证书给Harbor和Docker
+生成后ca.crt，172.16.100.6.crt和172.16.100.6.key文件，必须将它们提供给Harbor和docker，重新配置它们。
+
+4.1 将服务器证书和密钥复制到Harbor主机上的/data/cert/文件夹中
+
+mkdir -p /data/cert/
+cp 172.16.100.6.crt /data/cert/
+cp 172.16.100.6.key /data/cert/
+4.2 转换172.16.100.6.crt为172.16.100.6.cert，供Docker使用
+
+Docker守护程序将.crt文件解释为CA证书，并将.cert文件解释为客户端证书
+
+penssl x509 -inform PEM -in 172.16.100.6.crt -out 172.16.100.6.cert
+
+4.3 将服务器证书，密钥和CA文件复制到Harbor主机上的Docker证书文件夹中。您必须首先创建适当的文件夹
+
+mkdir -p /etc/docker/certs.d/172.16.100.6/
+cp 172.16.100.6.cert /etc/docker/certs.d/172.16.100.6/
+cp 172.16.100.6.key/etc/docker/certs.d/172.16.100.6/
+cp ca.crt /etc/docker/certs.d/172.16.100.6/
+如果将默认nginx端口443 映射到其他端口，请创建文件夹/etc/docker/certs.d/yourdomain.com:port或/etc/docker/certs.d/harbor_IP:port
+4.4 证书的目录结构
+
+/etc/docker/certs.d/
+└── 172.16.100.6
+    ├── ca.crt
+    ├── 172.16.100.6.cert
+    └── 172.16.100.6.key
+
+部署Harbor harbor.yml
+[root@docker harbor]# cat harbor.yml | grep -v "#" | grep -v "^$"
+hostname: 172.16.100.6
+http:
+port: 80
+https:
+port: 443
+certificate: /data/cert/172.16.100.6.crt
+private_key: /data/cert/172.16.100.6.key
+harbor_admin_password: Harbor12345
+database:
+password: root123
+max_idle_conns: 50
+max_open_conns: 100
+data_volume: /data/harbor
+clair:
+updaters_interval: 12
+jobservice:
+max_job_workers: 10
+notification:
+webhook_job_max_retry: 10
+chart:
+absolute_url: disabled
+log:
+level: info
+local:
+rotate_count: 50
+rotate_size: 200M
+location: /data/harbor/log
+_version: 1.10.0
+proxy:
+http_proxy:
+https_proxy:
+no_proxy:
+components:
+- core
+- jobservice
+- clair
+6. 执行./installsh 安装harbor
+
+.docker 信任仓库配置
+
+[root@k8s-master ~]# cat /etc/docker/daemon.json    #在其他服务器上配置
+{
+ "insecure-registries": ["172.16.100.6"], #信任仓库配置
+ "registry-mirrors": ["https://03y7pxiw.mirror.aliyuncs.com"]
+}
+
+
+9.测试
+
+[root@k8s-master ~]# docker login https://172.16.100.6
+Username: admin   
+Password: 
+WARNING! Your password will be stored unencrypted in /root/.docker/config.json.
+Configure a credential helper to remove this warning. See
+https://docs.docker.com/engine/reference/commandline/login/#credentials-store
+
+Login Succeeded
